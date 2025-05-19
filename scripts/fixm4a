@@ -1,0 +1,77 @@
+#!/bin/bash
+#
+# NOTA BENE: ffmpeg is unable to properly move all tags! In particular, ReplayGain information, performer, and user-defined tags are LOST.
+#
+# Converts m4a files to proper m4a files using ffmpeg.
+# This is a workaround to solve Lollypop music player not playing Apple's AAC files correctly
+#
+# Input: <m4a files>… <directories>…
+# The script takes multiple args. When an arg is an existing file that ends with .m4a, it gets processed.
+# When it's a directory, all m4a files within it (recursively) get processed.
+# Because WSL is a mess with the handling of tmpfs (like /tmp not being one), a temporary file
+# is created next to the original file.
+# Ffmpeg converts the original to the temp file. On success, the temp file is renamed to the original, else it is destroyed.
+#
+# By Drax
+
+if (( $# == 0 )); then
+    echo "Missing argument(s): m4a files or directories"
+    exit 1
+fi
+
+errout() { printf "%s\n" "$*" >&2; }
+
+FFMPEG=
+if type -p "ffmpeg.exe" &>/dev/null; then
+    FFMPEG="ffmpeg.exe"
+elif type -p "ffmpeg" &>/dev/null; then
+    FFMPEG="ffmpeg"
+else
+    errout "Error: ffmpeg not found."
+    exit 1
+fi
+
+# precond: $1 must be a valid aac file in a writable directory
+convertFile() {
+    f="$1"
+    if file "$f" | grep -q AAC; then
+        d="$(dirname "$f")"
+        t="$(mktemp -p "$d" temp_XXXXXXXX.m4a)"
+        "$FFMPEG" -y -hide_banner -loglevel error -i "$f" -c copy -map 0 "$t"
+        # extra check because ffmpeg often returns 0 even when the job's not done; do not destroy the original file if ffmpeg failed
+        if (( $? == 0 )) && file "$t" | grep -q AAC; then
+            mv "$t" "$f"
+            errout "  Converted: $f"
+            return 0
+        else
+            rm "$t"
+            errout "  Error:     $f"
+        fi
+    else
+        errout "Skipping ${f} (not a valid AAC file)"
+    fi
+    return 1
+}
+
+# For GNU parallel
+export FFMPEG
+export -f errout
+export -f convertFile
+
+for arg in "${@}"; do
+    if [[ ! -e $arg ]]; then
+        errout "Skipping ${arg} (file not found)"
+    elif [[ -f $arg && $arg =~ \.m4a$ ]]; then
+        convertFile "$arg"
+    elif [[ -d $arg ]]; then
+        errout "Processing directory: ${arg}"
+        if type -p "parallel" &>/dev/null; then
+            # much faster
+            find "$arg" -name "*.m4a" -print0 | parallel -0 -j8 -n1 convertFile {}
+        else
+            find "$arg" -name "*.m4a" -print0 | while IFS= read -r -d '' file; do convertFile "$file"; done
+        fi
+    else
+        errout "Cannot process $arg"
+    fi
+done

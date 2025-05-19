@@ -1,0 +1,46 @@
+#!/bin/bash
+errout() { printf "%s\n" "$*" >&2; }
+
+if (( $# == 0 )); then
+  errout "Missing argument: mkv file(s)"
+  exit 1
+fi
+
+MKVINFO="mkvinfo.exe"
+type -p "$MKVINFO" &>/dev/null || MKVINFO="mkvinfo"
+type -p "$MKVINFO" &>/dev/null || MKVINFO=
+if [[ -z $MKVINFO ]]; then
+    errout "Error: mkvinfo not found"
+    exit 1
+fi
+
+for file in "$@"; do
+    if [ ! -f "$file" ]; then
+        errout "Not a file: ${file}"
+        continue
+    fi
+
+    $MKVINFO "$file" | tr -d '\r' | sed -En '
+      /^\|\+ Tracks/,/^\|\+/ {                          # only work on tracks
+          /^\|  \+ Track number/ {
+              s/^.*: ([0-9])\)/\1   /
+              h                                         # hold the track number, skip the next line (uid), read the next line (type)
+          }
+          /^\|  \+ Track type: / {
+              s/^\|  \+ Track type: (.*)/\1/            # extract the type
+              H
+          }
+          /^\|  \+ Language: / {
+              s/^\|  \+ Language: (.*)/\t[\1]/          # Grab the language if it exists, make it [lang]
+              H                                         # and append to the buffer
+          }
+          /^\|  \+ Name/ {                              # Get the track name
+              s/^\|  \+ Name: (.*)/ \1/
+              H
+          }
+          /^\|\s?\+/ {                                  # This should be the end of a track, time to get the buffer, remove the new lines, and print
+              g; s/\n//gp
+          }
+      }'
+
+done

@@ -1,0 +1,127 @@
+#!/bin/bash
+# Converts any audio file to opus using opusenc and the optional bitrate
+# The audio file is decoded by ffmpeg and piped to opusenc
+# If -f is specified, the encoding is done directly by ffmpeg (keeping tags)
+#
+# v1.1 2024-12 An update, after so many years of good service!
+#   - tell ffmpeg to output 32 bit floatsto avoid distortion if the source already clips
+#   - added a gain parameter (which forces ffmpeg decoding) that is missing in opusenc;
+#     it can be used to reduce the input by 1dB before encoding
+
+# Default Opus bitrate
+VERSION="Opusify v1.1"
+BITRATE=128
+USEFF=0
+
+errout() { printf "%s\n" "$*" >&2; }
+
+## For WSL, use tool.exe if it exists, otherwise try tool. Else, crash.
+getTool() {
+    (( $# != 1 )) && return 1
+    local RES=
+    if type -p "$1.exe" &>/dev/null; then
+        RES="$1.exe"
+    elif type -p "$1" &>/dev/null; then
+        RES="$1"
+    fi
+    [[ -z $RES ]] && return 1
+    echo "$RES"
+    return 0
+}
+
+FFMPEG=$(getTool ffmpeg)
+OPUSENC=$(getTool opusenc)
+MEDIAINFO=$(getTool mediainfo)
+
+usage () {
+    echo "$VERSION"
+    echo
+    echo "Usage: $(basename $0) [-b bitrate] [-f] [-g gain] [-o output] <audiofile.xxx>"
+    echo '    -b    bitrate in kilo'
+    echo '    -f    use ffmpeg instead of opusenc'
+    echo '    -g    apply gain (in dB) when decoding (forces ffmpeg decoding but not encoding)'
+    echo '    -o    output filename (default=input.opus)'
+    echo '    file  Any audio file supported by ffmpeg'
+    exit 1
+}
+
+options='b:fg:o:h'
+while getopts $options option; do
+    case "$option" in
+        b  ) BITRATE="$OPTARG";;
+        f  ) USEFF=1;;
+        g  ) GAIN=(-filter:a volume="${OPTARG}dB");;
+        o  ) OPUS="$OPTARG";;
+        h  ) usage;;
+        \? ) errout "Unknown option: -$OPTARG"; exit 1;;
+        :  ) errout "Missing option argument for -$OPTARG"; exit 1;;
+        *  ) errout "Unimplemented option: -$OPTARG"; exit 1;;
+    esac
+done
+
+shift $((OPTIND - 1))
+
+if (($# == 0)); then
+    errout "Error: no audio file specified"
+    exit 1
+fi
+
+if (($# != 1)); then
+    errout "Error: $0 takes exactly 1 argument"
+    exit 1
+fi
+
+AUDIO="$1"
+DECODE=1
+
+if [[ ! -f $AUDIO ]]; then
+    errout "Error: file ${AUDIO} does not exist or is not a file"
+    exit 1
+fi
+
+if [[ -z $OPUS ]]; then
+    OPUS="${AUDIO%.*}.opus"
+fi
+if [[ $AUDIO == $OPUS ]]; then
+    OPUS="_${AUDIO%.*}.opus"
+fi
+
+if [[ "$(file "$AUDIO")" =~ (WAVE|FLAC)" audio" ]]; then
+    DECODE=0
+fi
+
+if [[ $USEFF != 0 || -n $GAIN || $DECODE == 1 ]] && [[ -z $FFMPEG ]]; then
+    errout "Error: ffmpeg is needed but not found."
+    exit 1
+fi
+
+if [[ $USEFF == 0 && -z $OPUSENC ]]; then
+    errout "Error: opusenc requested but not found. Install opus or use -f for ffmpeg"
+    exit 1
+fi
+
+
+##### Both decode and encode using ffmpeg
+if [[ $USEFF != 0 ]]; then
+    "$FFMPEG" -hide_banner -y -i "$AUDIO" "${GAIN[@]}" -acodec libopus -b:a "${BITRATE}"k -vbr on "$OPUS"
+
+##### Decode with ffmpeg, encode with opusenc
+elif [[ $DECODE == 1 || -n $GAIN ]]; then
+    if [[ -n $MEDIAINFO ]]; then
+        INFO=$($MEDIAINFO --Output='General;%Performer%\n%Album%\n%Recorded_Date%\n%Track/Position%\n%Track%\n%Genre%' "$AUDIO" | tr -d '\r')
+        ARTIST=$(sed -n 1p <<< "$INFO")
+        ALBUM=$(sed -n 2p <<< "$INFO")
+        DATE=$(sed -n 3p <<< "$INFO")
+        TRACK=$(sed -n 4p <<< "$INFO")
+        TITLE=$(sed -n 5p <<< "$INFO")
+        GENRE=$(sed -n 6p <<< "$INFO")
+        "$FFMPEG" -hide_banner -y -i "$AUDIO" "${GAIN[@]}" -acodec pcm_f32le -f wav - | "$OPUSENC" --vbr --bitrate "$BITRATE" --date "$DATE" --artist "$ARTIST" --album "$ALBUM" --track "$TRACK" --genre "$GENRE" --title "$TITLE" - "$OPUS"
+    else
+        "$FFMPEG" -hide_banner -y -i "$AUDIO" "${GAIN[@]}" -acodec pcm_f32le -f wav - | "$OPUSENC" --vbr --bitrate "$BITRATE" - "$OPUS"
+        errout "Warning: mediainfo not found; the metadata could not be copied."
+    fi
+
+##### Both decode and encode with opusenc
+else
+    "$OPUSENC" --vbr --bitrate "$BITRATE" "$AUDIO" "$OPUS"
+fi

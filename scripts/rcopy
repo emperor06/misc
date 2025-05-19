@@ -1,0 +1,27 @@
+#!/bin/sh
+# Remplacement for scp
+# By Drax
+
+#a = rlptgoD
+#g = preserve group
+#o = preserve owner
+#z = compression
+#h = human readable
+#e = execute (ssh)
+#D = specials + devices
+#r = recursive
+#l = links (copy simlinks as simlinks)
+#p = perms (preserve perms)
+#t = time (preserve mod time)
+#s = secluded-args (safe arguments)
+
+# Notes: disable owner+group because of Windows
+# Note:  disable permissions when copying from NTFS (so you get user mask instead of 777)
+#   pb: umask will remove write access to g+o, leaving execute to regular files. Best to chmod…
+# -W (whole-files) can be passed too, useful for WSL bugs
+# Adding -- after the options may prevent passing more options
+# Compression: rsync compression is always beneficial
+# SSH compression is good on many small files, slightly detrimental on few big mkvs
+# So in case of backups, use -e 'ssh -C', otherwise don't bother
+
+rsync -Drlptshze 'ssh -oCompression=no' --progress "$@"

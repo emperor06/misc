@@ -1,0 +1,207 @@
+#!/bin/bash
+# Reads a cue file and converts the big flac to separate opus/aac files.
+#
+# Requirements:
+#   - bash (that's the first line of the script)
+#   - opusenc
+#   - qaac.exe (best aac encoder on Windows, replace with something else on Linux or use Wine)
+#   - either ffmpeg or flaccl.exe for flac encoding (note, shnsplit can produce flac but it's a bit slower and takes more space)
+#   - shnsplit from shntool (apt install shntool)
+#   - parallel (speeds up the encoding dramatically)
+#   - nproc (should be available everywhere, returns the number of usable threads)
+#
+# Features:
+#   - transfers metadata (artist, album, track, title, date)
+#   - parallel encoding for speed
+#   - produces Opus, Apple's aac, or flac
+#   - converts illegal characters automatically (:/?*)
+#   - names files properly (track-title.*)
+#   - cue/flac files are stored in _src while waves are in _wave (easy to remove with find)
+#   - 1.2 added -g for gain control
+#   - 1.3 added getTool(), removed flaccl for good (works much better with a single cpu thread, but still not better than ffmpeg)
+#
+# Bugs:
+#   Fixed now, but most unix tools fail multibyte characters.
+#   For example, shnsplit offers -m option to replace chars but fails with ¿.
+#   Or bash's readarray, unable to use ‡ as separator.
+# By Drax
+VERSION=1.3
+
+errout() { printf "%s\n" "$*" >&2; }
+
+#################################### Default options
+BITRATE=0
+TYPE="opus"
+KEEPWAV=0
+GAIN=wav
+type -p nproc &>/dev/null && NB_THREADS="$(nproc)" || NB_THREADS=4
+
+#################################### Programs
+
+getTool() {
+    (( $# != 1 )) && return 1
+    if type -p "$1.exe" &>/dev/null; then
+        echo "$1.exe"
+    elif type -p "$1" &>/dev/null; then
+        echo "$1"
+    else
+        return 1
+    fi
+}
+
+SHNSPLIT="$(getTool shnsplit)" || { errout "Error: shnsplit not found"; exit 11; }
+OPUSENC="$(getTool opusenc)"
+QAACENC="$(getTool qaac64)"
+FFMPEG="$(getTool ffmpeg)"
+METFLAC="$(getTool metaflac)"
+
+
+#################################### Helpers
+usage() {
+    errout "Cue2opus v${VERSION} by Drax"
+    errout
+    errout "Usage: $0 [-b <bitrate>] [-t <opus|aac|flac>] [-k] [-g gain] <filename.cue>"
+    errout
+    errout "  Note: use -k to keep the wav files"
+    errout "  Note: when no bitrate is given to aac, it uses tvbr mode with quality 64"
+	exit 10
+}
+
+checkType() {
+    case "$TYPE" in
+        opus ) [[ -n $OPUSENC ]] || { errout "Error: opusenc not found"; exit 11; } ;;
+        aac  ) [[ -n $QAACENC ]] || { errout "Error: qaac not found"; exit 11; } ;;
+        flac ) [[ -n $FFMPEG  ]] || { errout "Error: ffmpeg found"; exit 11; } ;;
+        *    ) usage ;;
+    esac
+}
+
+
+#################################### GetOpts options
+options=':b:kt:g:h'
+while getopts $options option
+do
+    case "$option" in
+        b  ) BITRATE="$OPTARG";;
+        k  ) KEEPWAV=1;;
+        t  ) TYPE="$OPTARG";;
+        g  ) GAIN="cust ext=wav ${FFMPEG} -i - -filter:a volume=${OPTARG}dB -f wav %f";; # -c:a pcm_f32le (since flac does not support 32 bit, there's no need for this)
+        h  ) usage;;
+        \? ) errout "Unknown option: -$OPTARG"; exit 9;;
+        :  ) errout "Missing option argument for -$OPTARG"; exit 9;;
+        *  ) errout "Unimplemented option: -$OPTARG"; exit 9;;
+    esac
+done
+shift $((OPTIND - 1))
+
+checkType
+
+#################################### Cue checks
+if (($# == 0)); then
+    errout "Error: no cue file specified"
+    exit 2
+fi
+
+if (($# != 1)); then
+    errout "Error: more than 1 cue file specified"
+    exit 2
+fi
+
+CUEFILE="$1"
+if [ ! -f "${CUEFILE}" ]; then
+    errout "Error: file ${CUEFILE} does not exist or is not a file"
+    exit 3
+fi
+
+
+#################################### Flac checks
+CUE=$(basename "$CUEFILE")
+DIR=$(dirname "$CUEFILE")
+FLAC=${DIR}/$(sed -nr 's/^FILE "([^"]*)".*/\1/p' "${CUEFILE}")
+if [ ! -f "${FLAC}" ]; then
+    errout "Error: file ${FLAC} referenced in cue not found!"
+    exit 4
+fi
+DATE=$(grep -oP 'REM DATE \K[0-9]+' "${CUEFILE}")
+NEWCUE="${DIR}/_${CUE}"
+WAVDIR="${DIR}/_waves"
+SRCDIR="${DIR}/_src"
+
+#################################### Sanitize
+sed -r -e '/(PERFORMER|TITLE)/ s/\?/¿/g' \
+       -e '/(PERFORMER|TITLE)/ s_/_∕_g' \
+       -e '/(PERFORMER|TITLE)/ s/\*/×/g' \
+       -e '/(PERFORMER|TITLE)/ s/\:/÷/g' \
+       "$CUEFILE" >"$NEWCUE"
+
+
+#################################### Encode function
+encode() {
+    local FILE="$1"
+	local DIRNAME=$(dirname "$FILE")
+    local BNAME=$(basename "$FILE")
+    declare -a INFO
+    IFS='‡' read -r -a INFO < <(echo $BNAME)
+    local ARTIST=$(sed -r -e 's/¿/?/g' -e 's_∕_/_g' -e 's/×/*/g' -e 's/÷/:/g' <<<"${INFO[0]}")
+    local ALBUM=$(sed -r -e 's/¿/?/g' -e 's_∕_/_g' -e 's/×/*/g' -e 's/÷/:/g' <<<"${INFO[1]}")
+    local TRACK="${INFO[2]}"
+    local TITLE=$(sed -r -e 's/¿/?/g' -e 's_∕_/_g' -e 's/×/*/g' -e 's/÷/:/g' -e 's/\.wav$//' <<<"${INFO[3]}")
+	local CLEANNAME=$(sed -r -e 's/¿//g' -e 's/÷/_/g' -e 's/\.wav$//' <<<"${INFO[3]}")
+    local OPNAME="${DIRNAME}/../${TRACK}-${CLEANNAME}"
+    local THEDATE=""
+    if [[ $TYPE == "opus" ]]; then
+        [[ -n "$DATE" ]] && THEDATE="--date ${DATE}"
+        (( $BITRATE == 0 )) && BITRATE=128
+        "$OPUSENC" --vbr --bitrate "$BITRATE" --artist "$ARTIST" --album "$ALBUM" $THEDATE --track "$TRACK" --title "$TITLE" "$FILE" "${OPNAME}.opus"
+    elif [[ $TYPE == "aac" ]]; then
+        [[ -n "$DATE" ]] && THEDATE="--date ${DATE}"
+        QUALITY="-V 64"
+        (( $BITRATE == 0 )) || QUALITY="-v ${BITRATE}"
+        "$QAACENC" "$QUALITY" -q 2 -r auto --threading --artist "$ARTIST" --album "$ALBUM" $THEDATE --track "$TRACK" --title "$TITLE" -o "${OPNAME}.m4a" "$FILE"
+    elif [[ $TYPE == "flac" ]]; then
+        "$FFMPEG" -hide_banner -i "$FILE" "${OPNAME}.flac"
+        if [[ -n "$METFLAC" ]]; then
+            [[ -n "$DATE" ]] && THEDATE="--set-tag=DATE=${DATE}"
+            metaflac --set-tag=ARTIST="$ARTIST" --set-tag=ALBUM="$ALBUM" $THEDATE --set-tag=TRACKNUMBER="$TRACK" --set-tag=TITLE="$TITLE" "${OPNAME}.flac"
+        fi
+    fi
+    unset INFO;
+}
+
+
+#################################### Export functions and variables for find and parallel
+export -f encode
+export TYPE
+export DATE
+export BITRATE
+export OPUSENC
+export QAACENC
+export FLACENC
+export METFLAC
+export NB_THREADS
+
+#################################### Run
+mkdir -p "$WAVDIR"
+mkdir -p "$SRCDIR"
+
+## Extract songs
+"$SHNSPLIT" -o "${GAIN}" -t "%p‡%a‡%n‡%t" -d "$WAVDIR" -f "${NEWCUE}" "${FLAC}"
+
+if (( $? != 0 )); then
+  errout
+  errout "Error while splitting, aborting now."
+  rmdir  "$WAVDIR"
+  rmdir  "$SRCDIR"
+  exit 1
+fi
+
+find "$WAVDIR" -name "*.wav" | parallel -j "$NB_THREADS" -q encode
+
+if [[ "$TYPE" == "flac" ]] && [[ -z "$METFLAC" ]]; then
+    errout "Warning: could not set flac tags because metaflac is missing."
+fi
+
+#################################### Cleanup
+(( $KEEPWAV == 0 )) && rm -rf "$WAVDIR"
+rm "$NEWCUE"
+mv "$FLAC" "$CUEFILE" "${SRCDIR}/"

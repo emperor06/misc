@@ -1,0 +1,125 @@
+#!/bin/bash
+# Inserts the content of a given file into another file.
+# The text will be inserted "after" every line matching the given regex.
+# New: option to insert "before" as well.
+# By Drax
+
+declare inplace=0
+declare before=0
+declare content
+declare pattern
+
+errout() { printf "%s\n" "$*" >&2; exit 1; }
+
+usage () {
+    cat <<EOF
+Usage: $(basename $0) [-i] [-b] -c <cfile> -p <pattern> files ...
+
+Inserts the content of a given file into another file.
+The text will be inserted "after" every line matching the given regex,
+unless the -b option is given.
+
+Options:
+  -i             inplace: modify source files instead of printing to stdout
+  -b             insert before instead of after
+  -c <cfile>     file content to insert
+  -p <pattern>   regex used to determine where the insertion happens
+  files          List of files to modify (stdin otherwise)
+
+Known bug: this cannot insert before the last line
+EOF
+    exit 1
+}
+
+options='ibc:p:h'
+while getopts $options option
+do
+    case "$option" in
+        i  ) inplace=1;;
+        b  ) before=1;;
+        c  ) content="${OPTARG}";;
+        p  ) pattern="${OPTARG}";;
+        h  ) usage;;
+        \? ) echo "Unknown option: -$OPTARG" >&2; exit 1;;
+        :  ) echo "Missing option argument for -$OPTARG" >&2; exit 1;;
+        *  ) echo "Unimplemented option: -$OPTARG" >&2; exit 1;;
+    esac
+done
+shift $((OPTIND - 1))
+
+[[ -n $pattern ]] || errout "No pattern given. Aborting…"
+[[ -n $content ]] || errout "No content to insert. Aborting…"
+[[ -f $content ]] || errout "Content file not found (or not a file): ${content}"
+
+# if no input files, use stdin
+files=("$@")
+if (( $# == 0 )); then
+    files=(/dev/stdin)
+    inplace=0
+fi
+
+ip=
+((inplace)) && ip='-i'
+# Using ctrl+V+3 as delimiter, so I don't need to escape anything
+d=$'\03'
+
+# A note about sed here. Sed interprets *anything* after r as a filename. This includes closing braces.
+# So either use it on separate line, or use a one-line trick: sed -e "/pattern/ {r $file" -e 'N}' src
+if ((before)); then
+    sed "\\$d$pattern$d {
+      r $content
+      N
+    }" $ip "${files[@]}"
+else
+    sed "\\$d$pattern$d r $content" $ip "${files[@]}"
+fi
+
+
+
+############################# OLD VERSION
+#
+# Note about the -i option
+# Only gawk handles it, so I had to check if gawk was installed when -i was active.
+# Worse, it doesn't work when passing multiple files (only the first one gets modified).
+# This gawk's -i inplace seems buggy. Why is it not like sed's?
+# Anyway, I had to implement it myself…
+#
+#prog="$(command -v mawk)" || prog="$(command -v awk)" || { echo >&2 "This script requires awk."; exit 1; }
+#doMagic () {
+#    "$prog" -v pattern="$pattern" -v content="$content" '
+#    {
+#        if ($0 ~ pattern) {
+#            print $0
+#            while (i=getline < content) {
+#                print;
+#            }
+#        } else
+#            print
+#    }' "$1"
+#}
+#
+# There are many ways to proceed…
+# Here are 3 different implementations, mostly kept to have syntax examples.
+# Mem1 is the fastest. Not sure how it handles weird things, empty lines, etc.
+# Mem2 is the slowest. People brag a lot about bash's process substitution but it turns out to be very slow.
+# Temp is the safest. Unless I added a -m parameter to choose a method, if something goes wrong with Mem1, then uncomment Temp instead
+#
+# Memory version 1: stores the whole file into a variable, then print
+#for file in "${files[@]}"; do
+#    RESULT=$(doMagic "$file")
+#    (( inplace )) && echo "$RESULT" >"$file" || echo "$RESULT"
+#done
+#
+# # Memory version 2: stores the whole file into a variable, then print
+#for file in "${files[@]}"; do
+#    read -d '' RESULT < <(doMagic "$file")
+#    (( inplace )) && echo "$RESULT" >"$file" || echo "$RESULT"
+#done
+#
+# # Temporary file version: probably slower but safer on large inputs
+#for file in "${files[@]}"; do
+#    tmpfile=$(mktemp)
+#    doMagic "$file" >"$tmpfile"
+#    (( inplace )) && cp -f "$tmpfile" "$file" || cat "$tmpfile"
+#    rm -f "$tmpfile"
+#done

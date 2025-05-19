@@ -1,0 +1,57 @@
+#!/bin/bash
+#
+# Moves files to another directory without overwritting.
+# If the destination file exists, try to increment the index number.
+# For example, moving file24.png somewhere else may give file29.png
+# if file{24..28}.png already exists
+#
+# By Drax
+
+# We need at least 1 source and 1 destination
+if (( $# < 2 )); then
+    echo "Usage: $(basename $0) <src> [src...] <dst>"
+    exit 1
+fi
+
+tmp=( "$@" )
+# Destination must be the last parameter
+dest="${tmp[-1]%/}"
+# After removing the trailing /, make sure there's still something (in case / was given as argument)
+(( ${#dest} == 0)) && dest=/
+# Remove the last argument so the input array only contains source files
+unset tmp[-1]
+readarray -d '' input < <(printf '%s\0' "${tmp[@]}" | sort -zV)
+
+# Make sure the destination is a writable directory
+if [[ ! -d $dest || ! -w $dest ]]; then
+    echo "Error: destination '${dest}' is not a valid directory "
+    exit 1
+fi
+
+# Process all source files
+for src in "${input[@]}"; do
+    # Ensure the source file exists
+    if [[ ! -f $src ]]; then
+        echo "File '${src}' does not exist or is not a file. Skipping."
+        continue
+    fi
+
+    sdir="$(dirname "${src}")"
+    sname="$(basename "${src}")"
+    if [[ ! -f "${dest}/${sname}" ]]; then         # trivial case
+        echo "Moving   ${sname}"
+        mv -i "${src}" "${dest}/"
+    else
+        oname="${sname%.*}"                                              # name without the extension (if any)
+        ext="$([[ "$sname" = *.* ]] && echo ".${sname##*.}" || echo '')" # the extension with the dot (or empty if there's no extension)
+        name="${oname%"${oname##*[!0-9]}"}"                              # remove trailing number
+        num=1
+        while [[ -e "${dest}/${name}${num}${ext}" ]]; do
+            (( num++ ))
+        done
+        echo "Renaming ${sname} to ${dest}/${name}${num}${ext}"
+        mv -i "${src}" "${dest}/${name}${num}${ext}"
+    fi
+
+done
+

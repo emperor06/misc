@@ -1,0 +1,115 @@
+#!/bin/bash
+#
+# recbz: recompress cbz archives with webp images
+# Note: my cbz reader does not support heif, nor avif, nor jpegxl, so that's all I can do
+# Note: the recompressed cbz will be found in the "done" directory, relative to pwd.
+# Important! Works only on flat cbz. I haven't done anything special in case the cbz contains subfolders
+# and if it does, there will be problems.
+#
+# This script arised a surprisingly high amount of pitfalls, some of them being just plain stupid.
+# For example: find "$srcdir" -type f | parallel -j12 cwebp.exe -q $QUALITY {} -o "${dstdir}/{/.}.webp"
+# This doesn't work for many reasons:
+#   - first, the {} MUST be quoted, while everything about bash, modern shells, and parameter expansions tell you it's not necessary
+#   - then even with quotes, I get bugs (probably because the filenames and dirnames contain spaces AND dashes)
+#   - using -- prevents the use of -o
+#   - using: find "$srcdir" -type f | parallel -j12 cwebp.exe -q $QUALITY '{}' -o "${dstdir}/{/.}.webp"
+#     always try to output to High-Rise instead of "High-Rise Invasion v01/the long filename.webp", no matter how I quote it.
+# Another example is rename -e, which fails dramatically. For some reason, -E with 's/././;' works…
+# By Drax
+
+QUALITY=80
+OUT=./done
+AUTOREN=0
+RENSCRIPT=
+
+#################################### Usage
+usage () {
+    echo "Usage: $(basename "$0") [options] file1.cbz …" >&2
+    echo "" >&2
+    echo "  -q quality      Webp quality parameter (0-100)" >&2
+	echo "  -f script       A script file to use for renaming files. Disables -a" >&2
+	echo "  -a              Automatically rename files using the default rules." >&2
+}
+
+#################################### GetOpts options
+options=':q:f:ah'
+while getopts $options option
+do
+    case "$option" in
+        q  ) QUALITY=$OPTARG;;
+		f  ) RENSCRIPT="${OPTARG}";;
+		a  ) AUTOREN=1;;
+        h  ) usage; exit 0;;
+        \? ) echo "Unknown option: -$OPTARG" >&2; exit 1;;
+        :  ) echo "Missing option argument for -$OPTARG" >&2; exit 1;;
+        *  ) echo "Unimplemented option: -$OPTARG" >&2; exit 1;;
+    esac
+done
+shift $((OPTIND - 1))
+
+#################################### Checks
+if (($# < 1)); then
+    usage
+    exit 0
+fi
+
+if [[ ! -z ${RENSCRIPT} ]] && [[ ! -x ${RENSCRIPT} ]]; then
+	echo "Error: script ${RENSCRIPT} does not exist or is not executable." >&2
+	exit 1
+fi
+
+mkdir -p "$OUT"
+if [[ ! -d "$OUT" ]]; then
+    echo "Error: cannot create output directory" >&2
+    exit 1
+fi
+
+#################################### Codec
+export QUALITY
+function compressIt() {
+    what="$(basename "$1")"
+    what="${what%.*}.webp"
+    cwebp.exe -q $QUALITY -o "${dstdir}/${what}" -- "$1"
+}
+export -f compressIt
+
+#################################### Main
+
+for file in "$@"; do
+    if [ ! -f "$file" ]; then
+        echo "Not a file: ${file}" >&2
+        continue
+    fi
+
+    if [[ $(file -b --mime-type "$file") != application/zip ]]; then
+        echo "Not a valid cbz: ${file}" >&2
+        continue
+    fi
+
+    fn="$(basename "$file")"
+    dn="$(dirname "$file")"
+    fne="${fn%.*}"
+    srcdir="${dn}/_${fne}"
+    dstdir="${dn}/${fne}"
+    mkdir -p "$srcdir"
+    if unzip -j -d "$srcdir" "$file"; then
+        # Clean the filenames, for I hate [this kind] (of shit)
+		if [[ ! -z ${RENSCRIPT} ]]; then
+			"$RENSCRIPT" "${srcdir}/"*
+		elif (( AUTOREN == 1 )); then
+			rename -d -E 's/\s?\[[^]]*\]\s?//g;' -E 's/\s?\([^)]*\)\s?//g;' -E 's/\s?\{[^}]*\}\s?//g;' "${srcdir}/"*
+		fi
+        mkdir -p "$dstdir"
+        export dstdir
+        find "$srcdir" -type f | parallel -j12 -I {} compressIt "{}"
+        if zip "${OUT}/${fn}" "$dstdir"/*; then
+            rm -rf "$dstdir"
+        else
+            echo "Error while creating the cbz archive: ${OUT}/${fn}" >&2
+            echo "The files are still in ${dstdir}" >&2
+        fi
+    else
+        echo "Error while unzipping ${file}" >&2
+    fi
+#    rm -rf "$srcdir"
+done
